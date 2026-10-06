@@ -1,0 +1,6 @@
+[Unit]
+Description=you-sum v2 update check
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /home/yousum/app/deploy/update.sh

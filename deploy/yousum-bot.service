@@ -1,0 +1,16 @@
+[Unit]
+Description=you-sum v2 bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=yousum
+WorkingDirectory=/home/yousum/app
+ExecStart=/home/yousum/app/.venv/bin/python -m app.bot
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/yousum/app/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target

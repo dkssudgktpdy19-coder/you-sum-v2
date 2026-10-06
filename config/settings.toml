@@ -1,0 +1,10 @@
+# 기본 설정입니다. 휴대폰에서 바꾸는 기능은 다음 묶음에서 붙습니다.
+[report]
+time = "07:00"
+timezone = "Asia/Seoul"
+
+[videos]
+longform_min_seconds = 600
+
+[limits]
+max_usage_ratio = 0.7
