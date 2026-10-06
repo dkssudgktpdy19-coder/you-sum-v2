@@ -40,13 +40,13 @@ fi
 chown yousum:yousum "$SECRETS"
 chmod 600 "$SECRETS"
 
-echo "[4/5] 서비스 등록 (자동 시작 + 5분마다 업데이트 확인)"
+echo "[4/5] 서비스 등록 (자동 시작 + 예약 작업)"
 cp "$APP"/deploy/yousum-*.service "$APP"/deploy/yousum-*.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --quiet yousum-bot.service yousum-update.timer
+systemctl enable --quiet yousum-bot.service
+for t in "$APP"/deploy/yousum-*.timer; do systemctl enable --now --quiet "$(basename "$t")"; done
 systemctl restart yousum-bot.service
-systemctl start yousum-update.timer
-echo "$(date '+%m/%d %H:%M') 처음 설치" > "$DATA/deploy/last_result"
+echo "$(date '+%m/%d %H:%M') 설치 스크립트 실행" > "$DATA/deploy/last_result"
 
 echo "[5/5] 확인"
 sleep 10
@@ -57,3 +57,4 @@ if [ -n "$CODE" ]; then
   echo "  새 봇에게 이 숫자 6자리만 보내세요:  $CODE"
   echo "=============================================="
 fi
+systemctl list-timers --no-pager | grep yousum || true

@@ -1,0 +1,13 @@
+[Unit]
+Description=you-sum v2 collect new videos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=yousum
+WorkingDirectory=/home/yousum/app
+ExecStart=/home/yousum/app/.venv/bin/python -m app.collector
+TimeoutStartSec=50min
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/yousum/app/.venv/bin:/usr/local/bin:/usr/bin:/bin

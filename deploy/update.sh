@@ -38,6 +38,7 @@ deploy() {
   as_user git -C "$APP" reset --hard --quiet "$rev" || return 1
   as_user "$APP/.venv/bin/pip" install --quiet -r "$APP/requirements.txt" || return 1
   cp "$APP"/deploy/yousum-*.service "$APP"/deploy/yousum-*.timer /etc/systemd/system/ && systemctl daemon-reload
+  for t in "$APP"/deploy/yousum-*.timer; do systemctl enable --now --quiet "$(basename "$t")"; done
   systemctl restart yousum-bot.service
   start=$(date +%s)
   for _ in $(seq 1 18); do

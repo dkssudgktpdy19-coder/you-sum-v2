@@ -1,2 +1,2 @@
 requests>=2.31
-yt-dlp
+yt-dlp[default]

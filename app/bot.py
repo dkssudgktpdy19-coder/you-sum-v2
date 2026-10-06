@@ -1,16 +1,18 @@
-"""you-sum v2 텔레그램 봇 (1차 묶음: 기기 등록, 상태 확인, 설정 보기)"""
+"""you-sum v2 텔레그램 봇 (2차 묶음: 채널 추가·삭제, 수집 현황)"""
+import json
 import logging
 import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import requests
-
+from app import youtube
 from app.config import APP_DIR, DATA_DIR, load_secrets, load_settings, save_secret
+from app.db import connect, get_meta, now_utc
+from app.telegram import Telegram
 
 log = logging.getLogger("yousum")
 KST = ZoneInfo("Asia/Seoul")
@@ -19,36 +21,26 @@ HEARTBEAT = DATA_DIR / "heartbeat"
 LAST_DEPLOY = DATA_DIR / "deploy" / "last_result"
 ANNOUNCED = DATA_DIR / "announced_version"
 
-COMMANDS = [("status", "상태 확인"), ("settings", "현재 설정 보기"), ("help", "도움말")]
+COMMANDS = [("status", "상태 확인"), ("channels", "등록 채널 목록"), ("recent", "최근 확인한 영상"),
+            ("settings", "현재 설정 보기"), ("help", "도움말")]
 ALIASES = {
     "/status": "status", "/상태": "status", "상태": "status",
+    "/channels": "channels", "/채널": "channels", "채널": "channels",
+    "/remove": "remove", "/삭제": "remove", "삭제": "remove",
+    "/recent": "recent", "/최근": "recent", "최근": "recent",
     "/settings": "settings", "/설정": "settings", "설정": "settings",
     "/help": "help", "/start": "help", "/도움말": "help", "도움말": "help",
 }
 HELP = (
-    "사용할 수 있는 명령\n"
-    "/status (또는 '상태') : 작동 상태, 메모리, 마지막 업데이트\n"
+    "📌 채널 추가: 유튜브 영상·쇼츠·채널 링크나 @핸들을 그대로 보내세요.\n\n"
+    "/status (또는 '상태') : 작동 상태와 수집 현황\n"
+    "/channels (또는 '채널') : 등록 채널 목록\n"
+    "/remove 번호 (또는 '삭제 번호') : 채널 삭제\n"
+    "/recent (또는 '최근') : 최근 확인한 영상과 롱폼 판정\n"
     "/settings (또는 '설정') : 현재 설정\n\n"
-    "영상 링크로 채널 추가하기와 아침 보고서는 다음 업데이트에서 붙습니다."
+    "아침 보고서는 다음 업데이트에서 붙습니다."
 )
-
-
-class Telegram:
-    def __init__(self, token):
-        self.base = f"https://api.telegram.org/bot{token}"
-
-    def call(self, method, http_timeout=30, **params):
-        params = {k: v for k, v in params.items() if v is not None}
-        resp = requests.post(f"{self.base}/{method}", json=params, timeout=http_timeout)
-        data = resp.json()
-        if not data.get("ok"):
-            raise RuntimeError(f"{method} 실패: {data.get('error_code')} {data.get('description')}")
-        return data["result"]
-
-    def send(self, chat_id, text):
-        for start in range(0, len(text), 4000):  # 텔레그램 한 통 최대 4,096자
-            self.call("sendMessage", chat_id=chat_id, text=text[start:start + 4000],
-                      link_preview_options={"is_disabled": True})
+ICONS = {"long": "🎬", "short": "✂️", "pending": "⏳", "skipped": "⛔"}
 
 
 def touch_heartbeat():
@@ -86,11 +78,48 @@ def duration(sec):
     return (f"{d}일 " if d else "") + f"{h}시간 {sec // 60}분"
 
 
-def status_text():
+def kst(iso_text):
+    if not iso_text:
+        return "날짜 모름"
+    return datetime.fromisoformat(iso_text).astimezone(KST).strftime("%m/%d %H:%M")
+
+
+def fmt_subs(n):
+    if n is None:
+        return "비공개"
+    if n >= 10000:
+        return f"{n / 10000:.1f}".rstrip("0").rstrip(".") + "만 명"
+    return f"{n:,}명"
+
+
+def fmt_len(sec):
+    return f"{sec // 60}분" if sec >= 60 else f"{sec}초"
+
+
+def threshold():
+    return load_settings()["videos"]["longform_min_seconds"]
+
+
+def active_channels(conn):
+    return conn.execute("SELECT channel_id, title, subscribers FROM channels WHERE active=1 "
+                        "ORDER BY added_at, rowid").fetchall()
+
+
+def status_text(conn):
     free_gb = shutil.disk_usage("/").free / 1024 ** 3
     last = LAST_DEPLOY.read_text(encoding="utf-8").strip() if LAST_DEPLOY.exists() else "기록 없음"
+    today0 = (datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+              .astimezone(timezone.utc).isoformat(timespec="seconds"))
+    counts = {r[0]: r[1] for r in conn.execute(
+        "SELECT kind, COUNT(*) FROM videos WHERE published_at>=? GROUP BY kind", (today0,))}
+    streak = int(get_meta(conn, "collect_fail_streak", "0"))
     return "\n".join([
-        "✅ 정상 작동 중",
+        "✅ 정상 작동 중" if streak == 0 else f"⚠️ 새 영상 확인에 문제가 있습니다 ({streak}회 연속)",
+        f"등록 채널: {len(active_channels(conn))}개",
+        f"마지막 수집: {get_meta(conn, 'last_collect', '아직 없음 (매시 5분에 실행)')}",
+        f"오늘 올라온 영상: 롱폼 {counts.get('long', 0)} · 기준 미달 {counts.get('short', 0)}"
+        f" · 확인 대기 {counts.get('pending', 0)}",
+        "",
         f"버전: {version()}",
         f"켜진 지: {duration(time.time() - STARTED_AT)}",
         f"메모리: {memory_text()}",
@@ -113,8 +142,129 @@ def settings_text():
     ])
 
 
-def handle(tg, state, update):
-    msg = update.get("message") or {}
+def channels_text(conn):
+    rows = active_channels(conn)
+    if not rows:
+        return "등록된 채널이 없습니다. 유튜브 링크를 보내 추가해 보세요."
+    lines = [f"📋 등록 채널 {len(rows)}개", ""]
+    lines += [f"{i}. {r['title']} · {fmt_subs(r['subscribers'])}" for i, r in enumerate(rows, 1)]
+    lines += ["", "삭제하려면: /remove 번호"]
+    return "\n".join(lines)
+
+
+def recent_text(conn):
+    rows = conn.execute(
+        "SELECT v.title, v.kind, v.duration_sec, v.published_at, v.note, c.title AS ch "
+        "FROM videos v LEFT JOIN channels c ON c.channel_id = v.channel_id "
+        "WHERE v.kind != 'baseline' ORDER BY COALESCE(v.published_at, v.found_at) DESC LIMIT 15").fetchall()
+    if not rows:
+        return "아직 확인한 새 영상이 없습니다. 채널을 등록하면 매시 5분에 확인합니다."
+    lines = ["🕘 최근 확인한 영상 (최대 15개)",
+             "🎬 롱폼 · ✂️ 기준 미달(쇼츠 포함) · ⏳ 길이 확인 대기 · ⛔ 제외", ""]
+    for r in rows:
+        length = f" ({fmt_len(r['duration_sec'])})" if r["duration_sec"] else ""
+        line = f"{ICONS.get(r['kind'], '•')} {kst(r['published_at'])} {r['ch'] or ''} · {(r['title'] or '')[:40]}{length}"
+        if r["kind"] in ("pending", "skipped") and r["note"]:
+            line += f"\n    └ {r['note']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def card_text(info, limit):
+    lines = ["📺 이 채널을 등록할까요?", "", f"이름: {info['title']}"]
+    if info.get("handle"):
+        lines.append(f"핸들: {info['handle']}")
+    lines.append(f"구독자: {fmt_subs(info.get('subscribers'))}")
+    if info["recent"]:
+        s = f"최근 영상 {info['recent']}개 중 롱폼({limit // 60}분 이상) {info['long']}개"
+        if info.get("avg_min"):
+            s += f", 롱폼 평균 {info['avg_min']}분"
+        lines.append(s)
+    if info.get("uploads_30d") is not None:
+        n = info["uploads_30d"]
+        more = " 이상" if n >= 15 else ""
+        lines.append(f"최근 30일 업로드: {n}개{more} (쇼츠 포함), 마지막 {kst(info['last_upload'])}")
+    if info["recent"] and info["long"] == 0:
+        lines.append("\n⚠️ 최근 롱폼이 없어 보고서에 거의 나오지 않을 수 있습니다.")
+    lines.append(f"\nhttps://www.youtube.com/channel/{info['channel_id']}")
+    return "\n".join(lines)
+
+
+def handle_link(tg, conn, chat_id, link):
+    tg.send(chat_id, "🔍 채널 정보를 확인하는 중입니다… (10~30초)")
+    limit = threshold()
+    try:
+        info = youtube.resolve_channel(link, limit)
+    except youtube.Blocked:
+        tg.send(chat_id, "⚠️ 유튜브가 잠시 요청을 막았습니다. 10~20분 뒤에 다시 보내 주세요.")
+        return
+    except Exception as e:
+        log.warning("채널 확인 실패 %s: %s", link, e)
+        tg.send(chat_id, "❌ 이 링크에서 채널을 찾지 못했습니다.\n링크가 맞는지, 비공개·삭제된 영상은 아닌지 확인해 주세요.")
+        return
+    cid = info["channel_id"]
+    row = conn.execute("SELECT active FROM channels WHERE channel_id=?", (cid,)).fetchone()
+    if row and row["active"]:
+        tg.send(chat_id, f"ℹ️ '{info['title']}'은(는) 이미 등록된 채널입니다.")
+        return
+    conn.execute("INSERT OR REPLACE INTO pending_channels VALUES(?,?,?)",
+                 (cid, json.dumps(info, ensure_ascii=False), now_utc()))
+    conn.commit()
+    tg.send(chat_id, card_text(info, limit),
+            buttons=[[{"text": "✅ 등록", "callback_data": f"add:{cid}"},
+                      {"text": "취소", "callback_data": "cancel"}]])
+
+
+def handle_remove(tg, conn, chat_id, arg):
+    rows = active_channels(conn)
+    if not arg.isdigit() or not 1 <= int(arg) <= len(rows):
+        tg.send(chat_id, "삭제할 채널 번호를 함께 보내 주세요. 예: /remove 3\n번호는 /channels 에서 볼 수 있습니다.")
+        return
+    ch = rows[int(arg) - 1]
+    tg.send(chat_id, f"🗑 '{ch['title']}' 채널을 삭제할까요?\n지금까지 모은 기록은 남고, 새 영상만 더 이상 확인하지 않습니다.",
+            buttons=[[{"text": "삭제", "callback_data": f"del:{ch['channel_id']}"},
+                      {"text": "취소", "callback_data": "cancel"}]])
+
+
+def handle_callback(tg, conn, state, cq):
+    msg = cq.get("message") or {}
+    chat_id = msg.get("chat", {}).get("id")
+    try:
+        tg.call("answerCallbackQuery", callback_query_id=cq["id"])
+    except Exception:
+        pass
+    if state["allowed"] is None or chat_id != state["allowed"]:
+        return
+    mid, data = msg.get("message_id"), cq.get("data") or ""
+    if data == "cancel":
+        tg.edit(chat_id, mid, (msg.get("text") or "") + "\n\n→ 취소했습니다.")
+        return
+    action, _, cid = data.partition(":")
+    if action == "add":
+        row = conn.execute("SELECT info FROM pending_channels WHERE channel_id=?", (cid,)).fetchone()
+        if not row:
+            tg.edit(chat_id, mid, "이 확인 카드는 이미 처리됐습니다. 필요하면 링크를 다시 보내 주세요.")
+            return
+        info = json.loads(row["info"])
+        conn.execute(
+            "INSERT INTO channels(channel_id, title, handle, subscribers, active, seeded, added_at, source) "
+            "VALUES(?,?,?,?,1,0,?,'link') ON CONFLICT(channel_id) DO UPDATE SET title=excluded.title, "
+            "handle=excluded.handle, subscribers=excluded.subscribers, active=1, seeded=0, removed_at=NULL",
+            (cid, info["title"], info.get("handle"), info.get("subscribers"), now_utc()))
+        conn.execute("DELETE FROM pending_channels WHERE channel_id=?", (cid,))
+        conn.commit()
+        tg.edit(chat_id, mid, f"✅ '{info['title']}' 등록 완료 (지금 {len(active_channels(conn))}개 채널)\n"
+                              "다음 정각 5분부터 새 영상을 확인합니다. 최근 2일 안의 영상부터 다룹니다.")
+    elif action == "del":
+        title_row = conn.execute("SELECT title FROM channels WHERE channel_id=?", (cid,)).fetchone()
+        cur = conn.execute("UPDATE channels SET active=0, removed_at=? WHERE channel_id=? AND active=1",
+                           (now_utc(), cid))
+        conn.commit()
+        title = title_row["title"] if title_row else cid
+        tg.edit(chat_id, mid, f"🗑 '{title}' 삭제했습니다." if cur.rowcount else "이미 삭제된 채널입니다.")
+
+
+def handle_message(tg, conn, state, msg):
     chat_id = msg.get("chat", {}).get("id")
     text = (msg.get("text") or "").strip()
     if not chat_id or not text:
@@ -134,18 +284,37 @@ def handle(tg, state, update):
         log.warning("허용되지 않은 대화방 무시 (chat_id=%s)", chat_id)
         return
 
-    key = ALIASES.get(text.split()[0].split("@")[0].lower())
+    parts = text.split(maxsplit=1)
+    key = ALIASES.get(parts[0].split("@")[0].lower())
+    arg = parts[1].strip() if len(parts) > 1 else ""
     if key == "status":
-        tg.send(chat_id, status_text())
+        tg.send(chat_id, status_text(conn))
+    elif key == "channels":
+        tg.send(chat_id, channels_text(conn))
+    elif key == "remove":
+        handle_remove(tg, conn, chat_id, arg)
+    elif key == "recent":
+        tg.send(chat_id, recent_text(conn))
     elif key == "settings":
         tg.send(chat_id, settings_text())
-    else:
+    elif key == "help":
         tg.send(chat_id, HELP)
+    else:
+        link = youtube.find_link(text)
+        tg.send(chat_id, HELP) if not link else handle_link(tg, conn, chat_id, link)
+
+
+def handle(tg, conn, state, update):
+    if "callback_query" in update:
+        handle_callback(tg, conn, state, update["callback_query"])
+    elif "message" in update:
+        handle_message(tg, conn, state, update["message"])
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = connect()
     secrets = load_secrets()
     token = secrets.get("TELEGRAM_BOT_TOKEN", "")
     if not token:
@@ -185,7 +354,7 @@ def main():
     while True:
         try:
             updates = tg.call("getUpdates", http_timeout=70, offset=offset, timeout=50,
-                              allowed_updates=["message"])
+                              allowed_updates=["message", "callback_query"])
             failures = 0
             touch_heartbeat()
         except Exception as e:
@@ -198,10 +367,11 @@ def main():
         for update in updates:
             offset = update["update_id"] + 1
             try:
-                handle(tg, state, update)
+                handle(tg, conn, state, update)
             except Exception:
                 log.exception("메시지 처리 실패")
-                chat = (update.get("message") or {}).get("chat", {}).get("id")
+                src = update.get("message") or (update.get("callback_query") or {}).get("message") or {}
+                chat = src.get("chat", {}).get("id")
                 if chat and chat == state["allowed"]:
                     try:
                         tg.send(chat, "⚠️ 처리 중 문제가 생겼습니다. 잠시 뒤 다시 보내 주세요. "
