@@ -1,4 +1,4 @@
-"""you-sum v2 텔레그램 봇 (2차 묶음: 채널 추가·삭제, 수집 현황)"""
+"""you-sum v2 텔레그램 봇 (3-1 묶음: 채널 관리, 수집 현황, 영상 분석 시험)"""
 import json
 import logging
 import shutil
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app import youtube
+from app import analyzer, gemini, youtube
 from app.config import APP_DIR, DATA_DIR, load_secrets, load_settings, save_secret
 from app.db import connect, get_meta, now_utc
 from app.telegram import Telegram
@@ -22,21 +22,23 @@ LAST_DEPLOY = DATA_DIR / "deploy" / "last_result"
 ANNOUNCED = DATA_DIR / "announced_version"
 
 COMMANDS = [("status", "상태 확인"), ("channels", "등록 채널 목록"), ("recent", "최근 확인한 영상"),
-            ("settings", "현재 설정 보기"), ("help", "도움말")]
+            ("test", "영상 하나 바로 분석"), ("settings", "현재 설정 보기"), ("help", "도움말")]
 ALIASES = {
     "/status": "status", "/상태": "status", "상태": "status",
     "/channels": "channels", "/채널": "channels", "채널": "channels",
     "/remove": "remove", "/삭제": "remove", "삭제": "remove",
     "/recent": "recent", "/최근": "recent", "최근": "recent",
+    "/test": "test", "/시험": "test", "시험": "test",
     "/settings": "settings", "/설정": "settings", "설정": "settings",
     "/help": "help", "/start": "help", "/도움말": "help", "도움말": "help",
 }
 HELP = (
     "📌 채널 추가: 유튜브 영상·쇼츠·채널 링크나 @핸들을 그대로 보내세요.\n\n"
-    "/status (또는 '상태') : 작동 상태와 수집 현황\n"
+    "/status (또는 '상태') : 작동 상태와 수집·분석 현황\n"
     "/channels (또는 '채널') : 등록 채널 목록\n"
     "/remove 번호 (또는 '삭제 번호') : 채널 삭제\n"
     "/recent (또는 '최근') : 최근 확인한 영상과 롱폼 판정\n"
+    "/test 링크 (또는 '시험 링크') : 영상 하나를 바로 분석\n"
     "/settings (또는 '설정') : 현재 설정\n\n"
     "아침 보고서는 다음 업데이트에서 붙습니다."
 )
@@ -113,12 +115,15 @@ def status_text(conn):
     counts = {r[0]: r[1] for r in conn.execute(
         "SELECT kind, COUNT(*) FROM videos WHERE published_at>=? GROUP BY kind", (today0,))}
     streak = int(get_meta(conn, "collect_fail_streak", "0"))
+    has_key = "있음" if load_secrets().get("GEMINI_API_KEY") else "❌ 없음"
     return "\n".join([
         "✅ 정상 작동 중" if streak == 0 else f"⚠️ 새 영상 확인에 문제가 있습니다 ({streak}회 연속)",
         f"등록 채널: {len(active_channels(conn))}개",
         f"마지막 수집: {get_meta(conn, 'last_collect', '아직 없음 (매시 5분에 실행)')}",
         f"오늘 올라온 영상: 롱폼 {counts.get('long', 0)} · 기준 미달 {counts.get('short', 0)}"
         f" · 확인 대기 {counts.get('pending', 0)}",
+        f"마지막 분석: {get_meta(conn, 'last_analyze', '아직 없음 (매시 15분·45분에 실행)')}",
+        f"AI 오늘 사용/허용: {gemini.budget_text(conn)} (Gemini 키 {has_key})",
         "",
         f"버전: {version()}",
         f"켜진 지: {duration(time.time() - STARTED_AT)}",
@@ -137,8 +142,9 @@ def settings_text():
         f"보고서 시각: 매일 {s['report']['time']} (한국 시간)",
         f"롱폼 기준: {s['videos']['longform_min_seconds'] // 60}분 이상",
         f"무료 한도 사용 상한: {int(s['limits']['max_usage_ratio'] * 100)}%",
+        f"AI 모델 순서: {' → '.join(s['ai']['models'])}",
         "",
-        "휴대폰에서 바꾸는 기능은 다음 업데이트에서 붙습니다.",
+        "휴대폰에서 바꾸는 기능은 나중 업데이트에서 붙습니다.",
     ])
 
 
@@ -213,6 +219,27 @@ def handle_link(tg, conn, chat_id, link):
     tg.send(chat_id, card_text(info, limit),
             buttons=[[{"text": "✅ 등록", "callback_data": f"add:{cid}"},
                       {"text": "취소", "callback_data": "cancel"}]])
+
+
+def handle_test(tg, conn, chat_id, arg):
+    vid = analyzer.video_id_from(arg)
+    if not vid:
+        tg.send(chat_id, "분석할 영상 링크를 함께 보내 주세요.\n예: /test https://youtu.be/영상ID")
+        return
+    tg.send(chat_id, "🧪 자막을 받아 분석하는 중입니다… (1~3분)")
+    try:
+        tg.send(chat_id, analyzer.format_result(analyzer.analyze_video(conn, vid)))
+    except youtube.Blocked:
+        tg.send(chat_id, "⚠️ 유튜브가 잠시 자막 요청을 막았습니다. 20~30분 뒤에 다시 해 주세요.")
+    except analyzer.NoSubtitles as e:
+        tg.send(chat_id, f"ℹ️ {e}")
+    except gemini.BudgetReached:
+        tg.send(chat_id, "⏸ 오늘 쓰기로 한 AI 무료 한도를 다 썼습니다. 오후 4~5시 이후 다시 해 주세요.")
+    except gemini.AIError as e:
+        tg.send(chat_id, f"❌ AI 분석 실패: {e}\n이 메시지를 캡처해 알려 주세요.")
+    except Exception as e:
+        log.exception("시험 분석 실패 %s", vid)
+        tg.send(chat_id, f"❌ 분석 중 문제가 생겼습니다: {str(e)[:200]}\n이 메시지를 캡처해 알려 주세요.")
 
 
 def handle_remove(tg, conn, chat_id, arg):
@@ -295,6 +322,8 @@ def handle_message(tg, conn, state, msg):
         handle_remove(tg, conn, chat_id, arg)
     elif key == "recent":
         tg.send(chat_id, recent_text(conn))
+    elif key == "test":
+        handle_test(tg, conn, chat_id, arg)
     elif key == "settings":
         tg.send(chat_id, settings_text())
     elif key == "help":

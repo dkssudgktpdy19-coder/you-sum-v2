@@ -1,0 +1,9 @@
+[Unit]
+Description=you-sum v2 update yt-dlp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=yousum
+ExecStart=/home/yousum/app/.venv/bin/pip install --quiet --upgrade "yt-dlp[default]"

@@ -41,9 +41,35 @@ CREATE TABLE IF NOT EXISTS meta(
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS transcripts(
+    video_id   TEXT PRIMARY KEY,
+    lang       TEXT,
+    kind       TEXT,
+    lines      TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS analyses(
+    video_id    TEXT PRIMARY KEY,
+    status      TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    source      TEXT,
+    model       TEXT,
+    result      TEXT,
+    error       TEXT,
+    next_try_at TEXT,
+    updated_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ai_usage(
+    day           TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    requests      INTEGER NOT NULL DEFAULT 0,
+    video_seconds INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(day, model)
+);
 """
 # videos.kind 값: pending(길이 확인 대기) / long(롱폼) / short(기준 미달, 쇼츠 포함)
 #                 skipped(3번 확인 실패로 제외) / baseline(등록 전에 올라온 지난 영상)
+# analyses.status 값: done(완료) / retry(나중에 다시) / failed(3번 실패) / no_transcript(자막 없음)
 
 
 def connect():

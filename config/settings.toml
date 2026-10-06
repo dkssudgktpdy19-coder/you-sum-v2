@@ -1,4 +1,4 @@
-# 기본 설정입니다. 휴대폰에서 바꾸는 기능은 다음 묶음에서 붙습니다.
+# 기본 설정입니다. 휴대폰에서 바꾸는 기능은 나중 묶음에서 붙습니다.
 [report]
 time = "07:00"
 timezone = "Asia/Seoul"
@@ -8,3 +8,14 @@ longform_min_seconds = 600
 
 [limits]
 max_usage_ratio = 0.7
+
+[ai]
+# 앞에서부터 쓰고, 한도가 차면 다음 모델로 넘어갑니다.
+models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+video_hours_per_day = 8
+
+# 모델별 하루 무료 요청 수. AI Studio '비율 제한' 화면을 보고 고칠 값입니다.
+# 실제로는 이 값의 70%까지만 씁니다.
+[ai.daily_requests]
+"gemini-2.5-flash" = 20
+"gemini-2.5-flash-lite" = 20
