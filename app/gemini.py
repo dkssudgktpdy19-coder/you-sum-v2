@@ -213,3 +213,5 @@ def generate(conn, parts, schema, video_seconds=0, label=None):
     if busy:
         raise Busy("Gemini가 잠시 바쁩니다: " + ", ".join(busy))
     raise BudgetReached("오늘 AI 무료 한도")
+
+
