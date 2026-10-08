@@ -13,9 +13,11 @@ API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateConten
 PT = ZoneInfo("America/Los_Angeles")
 NOT_COUNTED = (400, 401, 403, 404)  # 모델까지 가지 못한 요청은 한도를 쓰지 않으므로 세지 않음
 TRANSIENT = (429, 500, 502, 503, 504)  # 잠깐 바쁨
-COOLDOWN_MIN = 20          # 바쁘다고 답한 모델은 20분 쉬게 함
+COOLDOWN_MIN = 20          # 바쁘거나 응답이 없던 모델은 20분 쉬게 함
 MAX_FAILS_PER_CALL = 2     # 한 영상에서 실패 요청은 최대 2번까지만
 MIN_GAP_SEC = 13           # 같은 모델에 요청 사이 최소 간격 (분당 5회 한도 보호)
+TIMEOUT = (10, 240)        # (접속, 응답) 최대 대기 초
+THINKING_LEVEL = "low"     # 생각 단계: 문서상 사용 중인 6개 모델 모두 low 지원
 _last_call = {}
 
 
@@ -130,7 +132,8 @@ def generate(conn, parts, schema, video_seconds=0, label=None):
         if used(conn)[1] + video_seconds > cap:
             raise VideoBudgetReached("오늘 영상 직접 분석 시간 한도")
     # Gemini 3 계열은 temperature를 기본값으로 두라는 권고가 있어 따로 정하지 않습니다.
-    config = {"responseMimeType": "application/json", "responseJsonSchema": schema}
+    config = {"responseMimeType": "application/json", "responseJsonSchema": schema,
+              "thinkingConfig": {"thinkingLevel": THINKING_LEVEL}}
     if video_seconds:
         config["mediaResolution"] = "MEDIA_RESOLUTION_LOW"
     body = {"contents": [{"parts": parts}], "generationConfig": config}
@@ -149,7 +152,17 @@ def generate(conn, parts, schema, video_seconds=0, label=None):
             time.sleep(wait)
         t0 = time.time()
         try:
-            r = requests.post(API.format(model), headers={"x-goog-api-key": key}, json=body, timeout=300)
+            r = requests.post(API.format(model), headers={"x-goog-api-key": key}, json=body, timeout=TIMEOUT)
+        except requests.Timeout as e:
+            # 요청은 이미 모델에 도착했을 수 있으므로 한도 사용으로 셉니다.
+            ms = int((time.time() - t0) * 1000)
+            _last_call[model] = time.time()
+            _count(conn, model, video_seconds)
+            _record(conn, model, label, None, "timeout", str(e), ms=ms)
+            _cool(conn, model)
+            fails += 1
+            busy.append(f"{model} 응답 없음({ms // 1000}초)")
+            continue
         except requests.RequestException as e:
             _record(conn, model, label, None, "network", str(e))
             raise AIError(f"Gemini 연결 실패: {e}") from e
