@@ -11,6 +11,7 @@ from app.db import get_meta, set_meta
 
 API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
 PT = ZoneInfo("America/Los_Angeles")
+NOT_COUNTED = (400, 401, 403, 404)  # 모델까지 가지 못한 요청은 한도를 쓰지 않으므로 세지 않음
 
 
 class BudgetReached(Exception):
@@ -58,9 +59,9 @@ def _count(conn, model, video_seconds):
 
 def _message(r):
     try:
-        return r.json()["error"]["message"][:200]
+        return r.json()["error"]["message"][:150]
     except Exception:
-        return r.text[:200]
+        return r.text[:150]
 
 
 def _parse(data):
@@ -75,6 +76,7 @@ def _parse(data):
 
 def generate(conn, parts, schema, video_seconds=0):
     s = load_settings()
+    models = s["ai"]["models"]
     key = load_secrets().get("GEMINI_API_KEY")
     if not key:
         raise AIError("Gemini 키가 아직 저장되지 않았습니다 (set_gemini_key.sh 실행 필요)")
@@ -82,25 +84,32 @@ def generate(conn, parts, schema, video_seconds=0):
         cap = s["ai"]["video_hours_per_day"] * 3600 * s["limits"]["max_usage_ratio"]
         if used(conn)[1] + video_seconds > cap:
             raise VideoBudgetReached("오늘 영상 직접 분석 시간 한도")
-    config = {"responseMimeType": "application/json", "responseJsonSchema": schema, "temperature": 0.2}
+    # Gemini 3 계열은 temperature를 기본값으로 두라는 권고가 있어 따로 정하지 않습니다.
+    config = {"responseMimeType": "application/json", "responseJsonSchema": schema}
     if video_seconds:
         config["mediaResolution"] = "MEDIA_RESOLUTION_LOW"
     body = {"contents": [{"parts": parts}], "generationConfig": config}
 
-    busy, missing = False, []
-    for model in s["ai"]["models"]:
+    busy, unavailable = False, []
+    for model in models:
         if used(conn, model)[0] >= budget(model) or get_meta(conn, f"ai_exhausted:{pt_day()}:{model}"):
             continue
         for _ in range(2):
-            _count(conn, model, video_seconds)
             try:
                 r = requests.post(API.format(model), headers={"x-goog-api-key": key}, json=body, timeout=300)
             except requests.RequestException as e:
                 raise AIError(f"Gemini 연결 실패: {e}") from e
+            if r.status_code not in NOT_COUNTED:
+                _count(conn, model, video_seconds)
             if r.status_code == 200:
                 return model, _parse(r.json())
             if r.status_code == 429:
-                if "perday" in r.text.lower().replace(" ", "").replace("_", ""):
+                flat = r.text.lower().replace(" ", "").replace("_", "")
+                if '"limit":0' in flat or "limit:0," in flat or flat.endswith("limit:0"):
+                    unavailable.append(f"{model}(무료 등급에서 못 씀)")
+                    set_meta(conn, f"ai_exhausted:{pt_day()}:{model}", 1)
+                    break
+                if "perday" in flat:
                     set_meta(conn, f"ai_exhausted:{pt_day()}:{model}", 1)
                     break
                 busy = True
@@ -111,11 +120,11 @@ def generate(conn, parts, schema, video_seconds=0):
                 time.sleep(30)
                 continue
             if r.status_code == 404:
-                missing.append(model)
+                unavailable.append(f"{model}({_message(r)})")
                 break
             raise AIError(f"{model} 오류 {r.status_code}: {_message(r)}")
-    if missing and len(missing) == len(s["ai"]["models"]):
-        raise AIError(f"모델 이름을 찾을 수 없음: {', '.join(missing)}")
+    if unavailable and len(unavailable) == len(models):
+        raise AIError("쓸 수 있는 모델이 없음: " + " / ".join(unavailable))
     if busy:
         raise AIError("Gemini 서버가 잠시 바쁩니다")
     raise BudgetReached("오늘 AI 무료 한도")
