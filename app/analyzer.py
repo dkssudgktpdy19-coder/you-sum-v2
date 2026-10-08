@@ -182,7 +182,7 @@ def main():
     started, done, skipped, fails, busy, stop, last_err = time.time(), 0, 0, 0, 0, None, ""
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
-    while time.time() - started < RUN_LIMIT_SEC:
+    while time.time() - started < RUN_LIMIT_SEC - gemini.DEADLINE_SEC - GAP_SEC:
         row = conn.execute("SELECT v.video_id, COALESCE(a.attempts,0) AS attempts " + QUEUE_WHERE +
                            " ORDER BY v.published_at LIMIT 1", (since, now_utc())).fetchone()
         if not row:
