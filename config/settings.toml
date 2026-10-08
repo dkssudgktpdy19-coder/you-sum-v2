@@ -1,4 +1,3 @@
-# 기본 설정입니다. 휴대폰에서 바꾸는 기능은 나중 묶음에서 붙습니다.
 [report]
 time = "07:00"
 timezone = "Asia/Seoul"
@@ -10,14 +9,20 @@ longform_min_seconds = 600
 max_usage_ratio = 0.7
 
 [ai]
-# 앞에서부터 쓰고, 한도가 차거나 못 쓰는 모델이면 다음으로 넘어갑니다.
-# 정식(Stable) 이름만 씁니다. latest·preview 이름은 모르는 사이에 바뀌거나 사라질 수 있어서 피합니다.
-models = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
+models = [
+  "gemini-3.8-flash",
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+]
 video_hours_per_day = 8
 
-# 모델별 하루 무료 요청 수. AI Studio '비율 제한' 화면을 보고 고칠 임시 값입니다.
-# 실제로는 이 값의 70%까지만 씁니다.
 [ai.daily_requests]
+"gemini-3.8-flash" = 20
+"gemini-3.7-flash" = 20
+"gemini-3.6-flash" = 20
 "gemini-3.5-flash" = 20
-"gemini-3.1-flash-lite" = 20
-"gemini-3.5-flash-lite" = 20
+"gemini-3.5-flash-lite" = 500
+"gemini-3.1-flash-lite" = 500
