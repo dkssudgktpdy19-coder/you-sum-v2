@@ -82,6 +82,26 @@ CREATE TABLE IF NOT EXISTS ai_requests(
     ms             INTEGER
 );
 CREATE INDEX IF NOT EXISTS ai_requests_day ON ai_requests(day);
+CREATE TABLE IF NOT EXISTS reports(
+    day        TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    mode       TEXT,
+    messages   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS report_items(
+    video_id   TEXT PRIMARY KEY,
+    report_day TEXT NOT NULL,
+    tier       TEXT,
+    novelty    INTEGER,
+    reason     TEXT
+);
+CREATE INDEX IF NOT EXISTS report_items_day ON report_items(report_day);
+CREATE TABLE IF NOT EXISTS feedback(
+    video_id TEXT PRIMARY KEY,
+    vote     INTEGER NOT NULL,
+    at       TEXT NOT NULL
+);
+
 """
 # videos.kind 값: pending(길이 확인 대기) / long(롱폼) / short(기준 미달, 쇼츠 포함)
 #                 skipped(3번 확인 실패로 제외) / baseline(등록 전에 올라온 지난 영상)

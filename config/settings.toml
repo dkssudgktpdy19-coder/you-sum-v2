@@ -1,6 +1,8 @@
 [report]
 time = "07:00"
 timezone = "Asia/Seoul"
+must_max = 3          # '오늘 꼭 볼 것' 최대 개수
+
 
 [videos]
 longform_min_seconds = 600

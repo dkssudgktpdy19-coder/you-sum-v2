@@ -1,4 +1,4 @@
-"""you-sum v2 텔레그램 봇 (3-1 묶음: 채널 관리, 수집 현황, 영상 분석 시험)"""
+"""you-sum v2 텔레그램 봇 (채널 관리, 수집·분석 현황, 영상 분석 시험, 아침 보고서)"""
 import json
 import logging
 import shutil
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app import analyzer, gemini, youtube
+from app import analyzer, gemini, report, youtube
 from app.config import APP_DIR, DATA_DIR, load_secrets, load_settings, save_secret
 from app.db import connect, get_meta, now_utc
 from app.telegram import Telegram
@@ -21,10 +21,12 @@ HEARTBEAT = DATA_DIR / "heartbeat"
 LAST_DEPLOY = DATA_DIR / "deploy" / "last_result"
 ANNOUNCED = DATA_DIR / "announced_version"
 
-COMMANDS = [("status", "상태 확인"), ("channels", "등록 채널 목록"), ("recent", "최근 확인한 영상"),
-            ("test", "영상 하나 바로 분석"), ("settings", "현재 설정 보기"), ("help", "도움말")]
+COMMANDS = [("status", "상태 확인"), ("report", "아침 보고서 보기"), ("channels", "등록 채널 목록"),
+            ("recent", "최근 확인한 영상"), ("test", "영상 하나 바로 분석"), ("settings", "현재 설정 보기"),
+            ("help", "도움말")]
 ALIASES = {
     "/status": "status", "/상태": "status", "상태": "status",
+    "/report": "report", "/보고서": "report", "보고서": "report",
     "/channels": "channels", "/채널": "channels", "채널": "channels",
     "/remove": "remove", "/삭제": "remove", "삭제": "remove",
     "/recent": "recent", "/최근": "recent", "최근": "recent",
@@ -35,12 +37,14 @@ ALIASES = {
 HELP = (
     "📌 채널 추가: 유튜브 영상·쇼츠·채널 링크나 @핸들을 그대로 보내세요.\n\n"
     "/status (또는 '상태') : 작동 상태와 수집·분석 현황\n"
+    "/report (또는 '보고서') : 최근 아침 보고서 다시 보기\n"
+    "   /report 목록 · /report 10/07 (그날 영상 보고서) · /report 미리보기\n"
     "/channels (또는 '채널') : 등록 채널 목록\n"
     "/remove 번호 (또는 '삭제 번호') : 채널 삭제\n"
     "/recent (또는 '최근') : 최근 확인한 영상과 롱폼 판정\n"
     "/test 링크 (또는 '시험 링크') : 영상 하나를 바로 분석\n"
     "/settings (또는 '설정') : 현재 설정\n\n"
-    "아침 보고서는 다음 업데이트에서 붙습니다."
+    "☀️ 아침 보고서는 매일 정해진 시각에 자동으로 옵니다. 영상마다 👍/👎을 누르면 순위에 반영됩니다."
 )
 ICONS = {"long": "🎬", "short": "✂️", "pending": "⏳", "skipped": "⛔"}
 
@@ -116,6 +120,7 @@ def status_text(conn):
         "SELECT kind, COUNT(*) FROM videos WHERE published_at>=? GROUP BY kind", (today0,))}
     streak = int(get_meta(conn, "collect_fail_streak", "0"))
     has_key = "있음" if load_secrets().get("GEMINI_API_KEY") else "❌ 없음"
+    no_report = f"아직 없음 (매일 {load_settings()['report']['time']} 도착)"
     return "\n".join([
         "✅ 정상 작동 중" if streak == 0 else f"⚠️ 새 영상 확인에 문제가 있습니다 ({streak}회 연속)",
         f"등록 채널: {len(active_channels(conn))}개",
@@ -123,6 +128,7 @@ def status_text(conn):
         f"오늘 올라온 영상: 롱폼 {counts.get('long', 0)} · 기준 미달 {counts.get('short', 0)}"
         f" · 확인 대기 {counts.get('pending', 0)}",
         f"마지막 분석: {get_meta(conn, 'last_analyze', '아직 없음 (매시 15분·45분에 실행)')}",
+        f"마지막 보고서: {get_meta(conn, 'last_report', no_report)}",
         f"AI 오늘 사용/허용: {gemini.budget_text(conn)} (Gemini 키 {has_key})",
         "",
         f"버전: {version()}",
@@ -140,6 +146,7 @@ def settings_text():
     return "\n".join([
         "⚙️ 현재 설정",
         f"보고서 시각: 매일 {s['report']['time']} (한국 시간)",
+        f"'오늘 꼭 볼 것' 최대: {s['report'].get('must_max', 3)}개",
         f"롱폼 기준: {s['videos']['longform_min_seconds'] // 60}분 이상",
         f"무료 한도 사용 상한: {int(s['limits']['max_usage_ratio'] * 100)}%",
         f"AI 모델 순서: {' → '.join(s['ai']['models'])}",
@@ -226,7 +233,7 @@ def handle_test(tg, conn, chat_id, arg):
     if not vid:
         tg.send(chat_id, "분석할 영상 링크를 함께 보내 주세요.\n예: /test https://youtu.be/영상ID")
         return
-    tg.send(chat_id, "🧪 자막을 받아 분석하는 중입니다… (1~3분)")
+    tg.send(chat_id, "🧪 자막을 받아 분석하는 중입니다… (1~5분)")
     try:
         tg.send(chat_id, analyzer.format_result(analyzer.analyze_video(conn, vid)))
     except youtube.Blocked:
@@ -245,6 +252,43 @@ def handle_test(tg, conn, chat_id, arg):
         tg.send(chat_id, f"❌ 분석 중 문제가 생겼습니다: {str(e)[:200]}\n이 메시지를 캡처해 알려 주세요.")
 
 
+def handle_report(tg, conn, chat_id, arg):
+    a = arg.strip().lower()
+    if a in ("미리보기", "지금", "now", "preview"):
+        tg.send(chat_id, "🧾 아직 보고서에 안 나온 영상으로 미리보기를 만듭니다… (1~5분)\n"
+                         "저장하지 않으니 다음 아침 보고서에는 그대로 나옵니다.")
+        try:
+            report.preview(conn, tg, chat_id)
+        except Exception as e:
+            log.exception("미리보기 실패")
+            tg.send(chat_id, f"❌ 미리보기를 만들지 못했습니다: {str(e)[:200]}\n이 메시지를 캡처해 알려 주세요.")
+        return
+    if a in ("목록", "list"):
+        rows = report.recent_days(conn)
+        if not rows:
+            tg.send(chat_id, "아직 보낸 보고서가 없습니다.")
+            return
+        lines = ["🗂 지난 보고서 (영상 날짜 기준)", ""]
+        lines += [f"• {r['day'][5:].replace('-', '/')} 영상 {r['n']}개 · "
+                  f"{'비교 분석' if r['mode'] == 'ai' else '기본 정렬'}" for r in rows]
+        lines += ["", "다시 보기: /report 10/07"]
+        tg.send(chat_id, "\n".join(lines))
+        return
+    day = report.parse_day(a) if a else report.latest_day(conn)
+    if not day:
+        if a:
+            tg.send(chat_id, "날짜를 이해하지 못했습니다. 예: /report 10/07")
+        else:
+            tg.send(chat_id, f"아직 보낸 보고서가 없습니다. 매일 {load_settings()['report']['time']}에 도착합니다.\n"
+                             "미리 보려면: /report 미리보기")
+        return
+    msgs = report.saved(conn, day)
+    if not msgs:
+        tg.send(chat_id, f"{day} 영상 보고서가 없습니다. /report 목록 으로 확인해 보세요.")
+        return
+    report.deliver(tg, chat_id, msgs)
+
+
 def handle_remove(tg, conn, chat_id, arg):
     rows = active_channels(conn)
     if not arg.isdigit() or not 1 <= int(arg) <= len(rows):
@@ -259,13 +303,16 @@ def handle_remove(tg, conn, chat_id, arg):
 def handle_callback(tg, conn, state, cq):
     msg = cq.get("message") or {}
     chat_id = msg.get("chat", {}).get("id")
+    data = cq.get("data") or ""
+    allowed = state["allowed"] is not None and chat_id == state["allowed"]
+    toast = report.record_feedback(conn, data) if allowed and data.startswith("fb:") else None
     try:
-        tg.call("answerCallbackQuery", callback_query_id=cq["id"])
+        tg.call("answerCallbackQuery", callback_query_id=cq["id"], text=toast)
     except Exception:
         pass
-    if state["allowed"] is None or chat_id != state["allowed"]:
+    if not allowed or data.startswith("fb:"):
         return
-    mid, data = msg.get("message_id"), cq.get("data") or ""
+    mid = msg.get("message_id")
     if data == "cancel":
         tg.edit(chat_id, mid, (msg.get("text") or "") + "\n\n→ 취소했습니다.")
         return
@@ -319,6 +366,8 @@ def handle_message(tg, conn, state, msg):
     arg = parts[1].strip() if len(parts) > 1 else ""
     if key == "status":
         tg.send(chat_id, status_text(conn))
+    elif key == "report":
+        handle_report(tg, conn, chat_id, arg)
     elif key == "channels":
         tg.send(chat_id, channels_text(conn))
     elif key == "remove":
