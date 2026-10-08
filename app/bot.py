@@ -235,6 +235,9 @@ def handle_test(tg, conn, chat_id, arg):
         tg.send(chat_id, f"ℹ️ {e}")
     except gemini.BudgetReached:
         tg.send(chat_id, "⏸ 오늘 쓰기로 한 AI 무료 한도를 다 썼습니다. 오후 4~5시 이후 다시 해 주세요.")
+    except gemini.Busy as e:
+        tg.send(chat_id, "⏳ 구글 Gemini 서버가 지금 붐빕니다 (프로그램 고장 아님).\n"
+                         f"{e}\n5~10분 뒤 다시 /test 해 주세요. 자동 분석은 알아서 다시 시도합니다.")
     except gemini.AIError as e:
         tg.send(chat_id, f"❌ AI 분석 실패: {e}\n이 메시지를 캡처해 알려 주세요.")
     except Exception as e:
