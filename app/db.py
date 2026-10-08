@@ -66,10 +66,27 @@ CREATE TABLE IF NOT EXISTS ai_usage(
     video_seconds INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(day, model)
 );
+CREATE TABLE IF NOT EXISTS ai_requests(
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    at             TEXT NOT NULL,
+    day            TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    label          TEXT,
+    status         INTEGER,
+    outcome        TEXT,
+    detail         TEXT,
+    prompt_tokens  INTEGER,
+    output_tokens  INTEGER,
+    thought_tokens INTEGER,
+    finish         TEXT,
+    ms             INTEGER
+);
+CREATE INDEX IF NOT EXISTS ai_requests_day ON ai_requests(day);
 """
 # videos.kind 값: pending(길이 확인 대기) / long(롱폼) / short(기준 미달, 쇼츠 포함)
 #                 skipped(3번 확인 실패로 제외) / baseline(등록 전에 올라온 지난 영상)
 # analyses.status 값: done(완료) / retry(나중에 다시) / failed(3번 실패) / no_transcript(자막 없음)
+# ai_requests.outcome 값: ok / parse_fail / busy / no_free / day_limit / unavailable / error / network
 
 
 def connect():

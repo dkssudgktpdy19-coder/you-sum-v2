@@ -130,7 +130,7 @@ def analyze_video(conn, vid):
         source = "사람이 단 자막" if kind == "manual" else "자동 자막"
         prompt = PROMPT.format(source_note="아래는 영상 자막이다. 각 줄 앞의 [ ]는 그 내용이 나오는 시점이다.",
                                title=title, channel=channel, body="자막:\n" + to_prompt_text(lines))
-        model, result = gemini.generate(conn, [{"text": prompt}], SCHEMA)
+        model, result = gemini.generate(conn, [{"text": prompt}], SCHEMA, label=vid)
     else:
         if not duration or duration > VIDEO_FALLBACK_MAX_SEC:
             raise NoSubtitles("한국어 자막이 없고, 영상이 길어 직접 분석도 하지 않았습니다")
@@ -138,7 +138,7 @@ def analyze_video(conn, vid):
         prompt = PROMPT.format(source_note="첨부한 영상을 직접 보고 들은 내용으로 분석하라.",
                                title=title, channel=channel, body="")
         parts = [{"fileData": {"fileUri": f"https://www.youtube.com/watch?v={vid}"}}, {"text": prompt}]
-        model, result = gemini.generate(conn, parts, SCHEMA, video_seconds=duration)
+        model, result = gemini.generate(conn, parts, SCHEMA, video_seconds=duration, label=vid)
 
     result["_meta"] = {"title": title, "channel": channel, "duration": duration}
     save(conn, vid, "done", source=source, model=model, result=json.dumps(result, ensure_ascii=False))
@@ -179,7 +179,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     conn = connect()
     since = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat(timespec="seconds")
-    started, done, skipped, fails, stop, last_err = time.time(), 0, 0, 0, None, ""
+    started, done, skipped, fails, busy, stop, last_err = time.time(), 0, 0, 0, 0, None, ""
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     while time.time() - started < RUN_LIMIT_SEC:
@@ -190,14 +190,25 @@ def main():
         vid, attempts = row["video_id"], row["attempts"]
         later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec="seconds")
         try:
-            analyze_video(conn, vid)
-            done, fails = done + 1, 0
+            rec = analyze_video(conn, vid)
+            done, fails, busy = done + 1, 0, 0
+            log.info("완료 %d번째 %s %s %s", done, vid, rec["model"],
+                     rec["result"].get("_meta", {}).get("title", "")[:40])
         except gemini.VideoBudgetReached:
             six = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(timespec="seconds")
             save(conn, vid, "retry", attempts=attempts, error="영상 직접 분석 시간 한도", next_try_at=six)
         except gemini.BudgetReached:
             stop = "budget"
             break
+        except gemini.Busy as e:
+            half = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(timespec="seconds")
+            last_err = str(e)[:150]
+            save(conn, vid, "retry", attempts=attempts, error=last_err, next_try_at=half)
+            log.info("미룸 %s %s", vid, last_err)
+            busy += 1
+            if busy >= 2:
+                stop = "busy"
+                break
         except youtube.Blocked as e:
             stop, last_err = "blocked", str(e)[:150]
             break
@@ -218,10 +229,10 @@ def main():
     stamp = datetime.now(KST).strftime("%m/%d %H:%M")
     summary = f"{stamp} · 분석 {done}개 · 자막 없음 {skipped}개 · 대기 {left}개"
     if stop:
-        summary += {"budget": " · ⏸ AI 한도", "blocked": " · ⚠️ 자막 요청 막힘", "error": " · ⚠️ 오류 반복"}[stop]
+        summary += {"budget": " · ⏸ AI 한도", "blocked": " · ⚠️ 자막 요청 막힘",
+                    "error": " · ⚠️ 오류 반복", "busy": " · Gemini 혼잡, 30분 뒤 재시도"}[stop]
     set_meta(conn, "last_analyze", summary)
     log.info(summary)
-
     if stop == "budget":
         notify_once(conn, f"notified_budget:{gemini.pt_day()}",
                     f"⏸ 오늘 쓰기로 한 AI 무료 한도(70%)를 다 썼습니다.\n남은 롱폼 {left}개는 한도가 새로 풀리는 "
